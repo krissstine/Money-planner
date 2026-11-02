@@ -67,13 +67,26 @@ export default function Accounts({ onNavigate }) {
   });
   const [error, setError] = useState("");
 
-  // Dark background for this page only; restored when you leave it
+  // Full-screen dark page: clears the margins/padding around the app; restored when you leave
   useEffect(() => {
-    const prev = document.body.style.background;
-    document.body.style.background = "#0a0a0f";
-    document.body.style.margin = "0";
+    const html = document.documentElement;
+    const body = document.body;
+    const root = document.getElementById("root");
+    const els = [html, body, root];
+    const saved = els.map((el) => (el ? el.style.cssText : ""));
+
+    html.style.background = "#0a0a0f";
+    body.style.cssText +=
+      "margin:0;padding:0;background:#0a0a0f;display:block;min-width:0;";
+    if (root) {
+      root.style.cssText +=
+        "max-width:none;width:100%;margin:0;padding:0;text-align:left;";
+    }
+
     return () => {
-      document.body.style.background = prev;
+      els.forEach((el, i) => {
+        if (el) el.style.cssText = saved[i];
+      });
     };
   }, []);
 
@@ -442,6 +455,7 @@ const css = `
   --red: #ff8a8a;
 
   min-height: 100vh;
+  min-height: 100dvh; /* fits mobile browsers with moving address bars */
   width: 100%;
   box-sizing: border-box;
   color: var(--text);
@@ -453,7 +467,7 @@ const css = `
   text-align: left;
 }
 .ap *, .ap *::before, .ap *::after { box-sizing: border-box; }
-.ap-wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 56px; }
+.ap-wrap { max-width: 1440px; margin: 0 auto; padding: 32px 20px 56px; }
 
 .ap-head h1 { margin: 0 0 16px; font-size: 1.9rem; font-weight: 700; letter-spacing: -0.01em; }
 .ap-head nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }

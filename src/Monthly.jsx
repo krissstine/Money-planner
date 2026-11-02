@@ -14,6 +14,11 @@ const CURRENT_PAGE = "monthly";
 
 const EXPENSE_CATEGORIES = ["Food", "Rent", "Utilities", "Entertainment", "Other"];
 
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
 // Soft palette that fits the dark glass theme
 const PIE_COLORS = [
   "#8ab4ff",
@@ -26,17 +31,64 @@ const PIE_COLORS = [
   "#d4e08a",
 ];
 
+const pad = (n) => String(n).padStart(2, "0");
+// Rounds to centavos so sums like 0.1 + 0.2 compare correctly
+const r2 = (n) => Math.round(n * 100) / 100;
+
 function currentMonth() {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
 }
 
-function load(key, fallback) {
+// "2026-11" moved forward or back by whole months
+function shiftMonth(key, delta) {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+}
+
+function monthLabel(key) {
+  const [y, m] = key.split("-").map(Number);
+  return `${MONTH_NAMES[m - 1]} ${y}`;
+}
+
+// The saved transactions as raw text. Comparing text lets the page notice any change cheaply.
+function readRaw() {
   try {
-    const v = JSON.parse(localStorage.getItem(key));
-    return v ?? fallback;
+    return localStorage.getItem(TX_KEY) || "[]";
   } catch {
-    return fallback;
+    return "[]";
+  }
+}
+
+function parseTx(raw) {
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+// Budgets are stored per month: { "2026-11": { Food: 5000, Rent: 8000 } }.
+// An older flat format ({ Food: 5000 }) is moved into the current month.
+function loadBudgets() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(BUDGET_KEY));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out = {};
+    const legacy = {};
+    Object.entries(raw).forEach(([k, v]) => {
+      if (/^\d{4}-\d{2}$/.test(k) && v && typeof v === "object") out[k] = v;
+      else if (typeof v === "number" && v > 0) legacy[k] = v;
+    });
+    if (Object.keys(legacy).length) {
+      const cm = currentMonth();
+      out[cm] = { ...legacy, ...(out[cm] || {}) };
+    }
+    return out;
+  } catch {
+    return {};
   }
 }
 
@@ -48,7 +100,7 @@ function money(n) {
 }
 
 function barState(pct) {
-  if (pct >= 100) return "over";
+  if (pct > 100) return "over";
   if (pct >= 80) return "warn";
   return "ok";
 }
@@ -77,7 +129,9 @@ function PieChart({ slices, total }) {
       aria-label="Pie chart of spending by category"
     >
       {slices.length === 1 ? (
-        <circle cx={c} cy={c} r={r} fill={slices[0].color} stroke="#0a0a0f" strokeWidth="2" />
+        <circle cx={c} cy={c} r={r} fill={slices[0].color} stroke="#0a0a0f" strokeWidth="2">
+          <title>{`${slices[0].name}: ${money(slices[0].value)} (100%)`}</title>
+        </circle>
       ) : (
         slices.map((s) => {
           const start = angle;
@@ -101,21 +155,73 @@ function PieChart({ slices, total }) {
   );
 }
 
+// Lets you type freely (e.g. "0.5") without the field resetting on every keystroke.
+// A valid amount is saved as you type; clearing the field removes the budget.
+function BudgetInput({ value, onCommit, label }) {
+  const [text, setText] = useState(value ? String(value) : "");
+
+  // Keep the field in step when the budget changes from outside (e.g. "Copy last month")
+  useEffect(() => {
+    setText(value ? String(value) : "");
+  }, [value]);
+
+  function handleChange(e) {
+    const t = e.target.value;
+    setText(t);
+    const n = parseFloat(t);
+    if (t.trim() === "") onCommit(null);
+    else if (n > 0) onCommit(r2(n));
+  }
+
+  function handleBlur() {
+    const n = parseFloat(text);
+    if (!(n > 0)) {
+      setText("");
+      onCommit(null);
+    }
+  }
+
+  return (
+    <input
+      type="number"
+      min="0"
+      step="0.01"
+      inputMode="decimal"
+      value={text}
+      placeholder="Not set"
+      aria-label={label}
+      onChange={handleChange}
+      onBlur={handleBlur}
+    />
+  );
+}
+
 export default function Monthly({ onNavigate }) {
-  const [transactions] = useState(() => {
-    const t = load(TX_KEY, []);
-    return Array.isArray(t) ? t : [];
-  });
-  const [budgets, setBudgets] = useState(() => load(BUDGET_KEY, {}));
+  const [txRaw, setTxRaw] = useState(readRaw);
+  const transactions = useMemo(() => parseTx(txRaw), [txRaw]);
+  const [budgets, setBudgets] = useState(loadBudgets);
   const [month, setMonth] = useState(currentMonth);
 
-  // Dark background for this page only; restored when you leave it
+  // Full-screen dark page: clears the margins/padding around the app; restored when you leave
   useEffect(() => {
-    const prev = document.body.style.background;
-    document.body.style.background = "#0a0a0f";
-    document.body.style.margin = "0";
+    const html = document.documentElement;
+    const body = document.body;
+    const root = document.getElementById("root");
+    const els = [html, body, root];
+    const saved = els.map((el) => (el ? el.style.cssText : ""));
+
+    html.style.background = "#0a0a0f";
+    body.style.cssText +=
+      "margin:0;padding:0;background:#0a0a0f;display:block;min-width:0;";
+    if (root) {
+      root.style.cssText +=
+        "max-width:none;width:100%;margin:0;padding:0;text-align:left;";
+    }
+
     return () => {
-      document.body.style.background = prev;
+      els.forEach((el, i) => {
+        if (el) el.style.cssText = saved[i];
+      });
     };
   }, []);
 
@@ -127,44 +233,94 @@ export default function Monthly({ onNavigate }) {
     }
   }, [budgets]);
 
+  // Keep Income, Spent and Remaining live. New transactions are picked up when they are saved
+  // in another tab, when you return to this tab, and by a quick check every second, so it
+  // also works when Accounts and this page are open in the same tab.
+  // (If the saved text has not changed, React skips the update, so this costs almost nothing.)
+  useEffect(() => {
+    const reload = () => setTxRaw(readRaw());
+    window.addEventListener("storage", reload);
+    window.addEventListener("focus", reload);
+    window.addEventListener("money-planner-update", reload);
+    const timer = setInterval(reload, 1000);
+    return () => {
+      window.removeEventListener("storage", reload);
+      window.removeEventListener("focus", reload);
+      window.removeEventListener("money-planner-update", reload);
+      clearInterval(timer);
+    };
+  }, []);
+
+  const monthBudgets = budgets[month] || {};
+
   const data = useMemo(() => {
-    const inMonth = transactions.filter((t) => t.date && t.date.slice(0, 7) === month);
-    const income = inMonth.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+    const inMonth = transactions.filter(
+      (t) => t && t.date && t.date.slice(0, 7) === month && Number.isFinite(t.amount)
+    );
+    const income = r2(inMonth.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0));
     const spentBy = {};
     inMonth
       .filter((t) => t.type === "expense")
       .forEach((t) => {
         spentBy[t.category] = (spentBy[t.category] || 0) + t.amount;
       });
-    const spent = Object.values(spentBy).reduce((s, n) => s + n, 0);
-    const categories = [...new Set([...EXPENSE_CATEGORIES, ...Object.keys(spentBy)])];
-    return { income, spent, spentBy, categories };
+    Object.keys(spentBy).forEach((k) => (spentBy[k] = r2(spentBy[k])));
+    const spent = r2(Object.values(spentBy).reduce((s, n) => s + n, 0));
+    return { income, spent, spentBy };
   }, [transactions, month]);
 
-  const remaining = data.income - data.spent;
-  const usedPct = data.income > 0 ? (data.spent / data.income) * 100 : 0;
+  // Standard categories first, then any custom ones that have spending or a budget
+  const categories = [
+    ...new Set([
+      ...EXPENSE_CATEGORIES,
+      ...Object.keys(data.spentBy).sort(),
+      ...Object.keys(monthBudgets).sort(),
+    ]),
+  ];
 
-  // Only categories with spending appear in the pie
-  const slices = useMemo(
-    () =>
-      data.categories
-        .map((name, i) => ({
-          name,
-          value: data.spentBy[name] || 0,
-          color: PIE_COLORS[i % PIE_COLORS.length],
-        }))
-        .filter((s) => s.value > 0),
-    [data]
+  const remaining = r2(data.income - data.spent);
+  const usedPct = data.income > 0 ? (data.spent / data.income) * 100 : data.spent > 0 ? 100 : 0;
+  const budgetedTotal = r2(Object.values(monthBudgets).reduce((s, n) => s + n, 0));
+  // Budget still waiting to be spent (a category already over budget reserves nothing)
+  const stillReserved = r2(
+    categories.reduce(
+      (s, c) => s + Math.max(0, (monthBudgets[c] || 0) - (data.spentBy[c] || 0)),
+      0
+    )
+  );
+  // Money left after expenses AND after the budgets still waiting to be spent
+  const unassigned = r2(remaining - stillReserved);
+  const overBudget = categories.filter(
+    (c) => monthBudgets[c] > 0 && (data.spentBy[c] || 0) > monthBudgets[c]
   );
 
-  function setBudget(cat, value) {
-    const n = parseFloat(value);
+  // Only categories with spending appear in the pie. Colours stay fixed per category.
+  const slices = categories
+    .map((name, i) => ({
+      name,
+      value: data.spentBy[name] || 0,
+      color: PIE_COLORS[i % PIE_COLORS.length],
+    }))
+    .filter((s) => s.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  const prevMonth = shiftMonth(month, -1);
+  const canCopy = Object.keys(monthBudgets).length === 0 && Object.keys(budgets[prevMonth] || {}).length > 0;
+
+  function setBudget(cat, amount) {
     setBudgets((b) => {
+      const cur = { ...(b[month] || {}) };
+      if (amount > 0) cur[cat] = amount;
+      else delete cur[cat];
       const next = { ...b };
-      if (value === "" || !(n > 0)) delete next[cat];
-      else next[cat] = n;
+      if (Object.keys(cur).length) next[month] = cur;
+      else delete next[month];
       return next;
     });
+  }
+
+  function copyPrevious() {
+    setBudgets((b) => ({ ...b, [month]: { ...(b[prevMonth] || {}) } }));
   }
 
   return (
@@ -196,14 +352,20 @@ export default function Monthly({ onNavigate }) {
 
         <div className="mp-title-row">
           <h2>Monthly budget progress</h2>
-          <label className="mp-month">
-            Month
-            <input
-              type="month"
-              value={month}
-              onChange={(e) => e.target.value && setMonth(e.target.value)}
-            />
-          </label>
+          <div className="mp-month-nav">
+            <button type="button" onClick={() => setMonth(shiftMonth(month, -1))} aria-label="Previous month">
+              ‹
+            </button>
+            <span aria-live="polite">{monthLabel(month)}</span>
+            <button type="button" onClick={() => setMonth(shiftMonth(month, 1))} aria-label="Next month">
+              ›
+            </button>
+            {month !== currentMonth() && (
+              <button type="button" className="mp-today" onClick={() => setMonth(currentMonth())}>
+                This month
+              </button>
+            )}
+          </div>
         </div>
 
         <section className="mp-summary" aria-label="Month summary">
@@ -221,14 +383,31 @@ export default function Monthly({ onNavigate }) {
           </div>
         </section>
 
+        {overBudget.length > 0 && (
+          <p className="mp-note mp-note-red mp-gap" role="status">
+            Over budget this month: {overBudget.join(", ")}.
+          </p>
+        )}
+
         <section className="mp-glass mp-card" aria-labelledby="overall-title">
           <div className="mp-row">
             <h3 id="overall-title">Income used</h3>
             <span className="mp-muted">
-              {data.income > 0 ? `${Math.round(usedPct)}%` : "No income this month"}
+              {data.income > 0
+                ? `${Math.round(usedPct)}%`
+                : data.spent > 0
+                ? "No income recorded"
+                : "No income this month"}
             </span>
           </div>
-          <div className="mp-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, Math.round(usedPct))} aria-label="Share of income spent">
+          <div
+            className="mp-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.min(100, Math.round(usedPct))}
+            aria-label="Share of income spent"
+          >
             <div
               className={`mp-fill mp-${barState(usedPct)}`}
               style={{ width: `${Math.min(100, usedPct)}%` }}
@@ -236,6 +415,11 @@ export default function Monthly({ onNavigate }) {
           </div>
           {data.income <= 0 && (
             <p className="mp-note">Add income for this month in Accounts Overview before adding expenses.</p>
+          )}
+          {data.income > 0 && data.spent > data.income && (
+            <p className="mp-note mp-note-red">
+              You spent {money(data.spent - data.income)} more than you earned this month.
+            </p>
           )}
         </section>
 
@@ -264,13 +448,34 @@ export default function Monthly({ onNavigate }) {
         </section>
 
         <section className="mp-glass mp-card" aria-labelledby="cat-title">
-          <h3 id="cat-title">Spending by category</h3>
-          <p className="mp-muted mp-hint">Set a monthly budget for any category to track it.</p>
+          <div className="mp-row">
+            <h3 id="cat-title">Spending by category</h3>
+            {canCopy && (
+              <button type="button" className="mp-copy" onClick={copyPrevious}>
+                Copy {monthLabel(prevMonth)} budgets
+              </button>
+            )}
+          </div>
+          <p className="mp-muted mp-hint">
+            Set a budget for {MONTH_NAMES[Number(month.slice(5, 7)) - 1]} in any category to track it. Budgets are
+            saved per month.
+          </p>
+
+          {budgetedTotal > 0 && (
+            <p className={`mp-plan ${unassigned < 0 ? "mp-out" : "mp-muted"}`}>
+              Budgeted {money(budgetedTotal)}
+              {data.income > 0
+                ? unassigned >= 0
+                  ? ` · ${money(unassigned)} of ${money(remaining)} remaining not assigned yet`
+                  : ` · ${money(-unassigned)} more than what's remaining`
+                : " · no income recorded for this month"}
+            </p>
+          )}
 
           <ul className="mp-list">
-            {data.categories.map((cat) => {
+            {categories.map((cat) => {
               const spent = data.spentBy[cat] || 0;
-              const budget = budgets[cat] || 0;
+              const budget = monthBudgets[cat] || 0;
               const pct = budget > 0 ? (spent / budget) * 100 : 0;
               return (
                 <li key={cat} className="mp-cat">
@@ -278,13 +483,11 @@ export default function Monthly({ onNavigate }) {
                     <span className="mp-cat-name">{cat}</span>
                     <label className="mp-budget">
                       <span className="mp-muted">Budget ({CURRENCY})</span>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={budget || ""}
-                        placeholder="Not set"
-                        onChange={(e) => setBudget(cat, e.target.value)}
+                      <BudgetInput
+                        key={`${month}-${cat}`}
+                        value={budget}
+                        label={`${cat} budget for ${monthLabel(month)}`}
+                        onCommit={(n) => setBudget(cat, n)}
                       />
                     </label>
                   </div>
@@ -310,8 +513,8 @@ export default function Monthly({ onNavigate }) {
                         </span>
                         <span className={spent > budget ? "mp-out" : "mp-muted"}>
                           {spent > budget
-                            ? `${money(spent - budget)} over`
-                            : `${money(budget - spent)} left`}
+                            ? `${money(r2(spent - budget))} over`
+                            : `${money(r2(budget - spent))} left`}
                         </span>
                       </div>
                     </>
@@ -340,6 +543,7 @@ const css = `
   --red: #ff8a8a;
 
   min-height: 100vh;
+  min-height: 100dvh; /* fits mobile browsers with moving address bars */
   width: 100%;
   box-sizing: border-box;
   color: var(--text);
@@ -351,20 +555,23 @@ const css = `
   text-align: left;
 }
 .mp *, .mp *::before, .mp *::after { box-sizing: border-box; }
-.mp-wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 56px; }
+.mp-wrap { max-width: 1440px; margin: 0 auto; padding: 32px 20px 56px; }
 
 .mp-head h1 { margin: 0 0 16px; font-size: 1.9rem; font-weight: 700; letter-spacing: -0.01em; }
 .mp-head nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
 .mp-nav { padding: 8px 14px; border-radius: 999px; font: inherit; font-size: 0.9rem; border: 1px solid transparent; background: transparent; color: var(--text); cursor: pointer; }
 .mp-nav-link:hover { background: var(--glass); border-color: var(--glass-edge); }
-.mp-nav:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mp-nav-on { background: var(--glass); border-color: var(--glass-edge); color: var(--accent); font-weight: 600; }
 .mp-nav-off { color: var(--muted); opacity: 0.55; cursor: not-allowed; }
+.mp button:focus-visible, .mp input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.mp-title-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.mp-title-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
 .mp-title-row h2 { margin: 0; font-size: 1.3rem; font-weight: 600; }
-.mp-month { display: flex; flex-direction: column; gap: 6px; font-size: 0.85rem; color: var(--muted); }
-
+.mp-month-nav { display: flex; align-items: center; gap: 12px; font-weight: 600; flex-wrap: wrap; }
+.mp-month-nav span { min-width: 150px; text-align: center; }
+.mp-month-nav button { width: 36px; height: 36px; border-radius: 10px; border: 1px solid var(--glass-edge); background: var(--glass); color: var(--text); font-size: 1.2rem; cursor: pointer; }
+.mp-month-nav button:hover { background: rgba(138, 180, 255, 0.14); }
+.mp-month-nav .mp-today { width: auto; padding: 0 12px; font-size: 0.85rem; font-weight: 600; color: var(--accent); }
 
 .mp input {
   padding: 10px 12px;
@@ -375,7 +582,6 @@ const css = `
   font: inherit;
   color-scheme: dark;
 }
-.mp input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .mp-glass {
   background: var(--glass);
@@ -400,7 +606,13 @@ const css = `
 .mp-hint { margin: 6px 0 18px; font-size: 0.88rem; }
 .mp-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .mp-small { font-size: 0.85rem; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.mp-plan { margin: -6px 0 16px; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
 .mp-note { margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 0.88rem; color: var(--amber); background: rgba(255, 194, 107, 0.08); border: 1px solid rgba(255, 194, 107, 0.25); }
+.mp-note-red { color: var(--red); background: rgba(255, 138, 138, 0.1); border-color: rgba(255, 138, 138, 0.3); }
+.mp-gap { margin: 0 0 20px; }
+
+.mp-copy { padding: 7px 12px; border-radius: 10px; border: 1px solid var(--glass-edge); background: var(--glass); color: var(--accent); font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+.mp-copy:hover { background: rgba(138, 180, 255, 0.14); }
 
 .mp-track { height: 10px; margin-top: 14px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
 .mp-fill { height: 100%; border-radius: 999px; transition: width 0.3s ease; }
